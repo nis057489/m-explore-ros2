@@ -187,7 +187,7 @@ void MapMerge::topicSubscribing()
       subscription.map_sub = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
           map_topic, map_qos,
           [this, &subscription](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
-            // fullMapUpdate(msg, subscription);
+            //fullMapUpdate(msg, subscription);
             ribltMapUpdate(msg, subscription);
           });
       RCLCPP_INFO(logger_, "Subscribing to MAP updates topic: %s.",
@@ -367,7 +367,7 @@ void MapMerge::partialMapUpdate(const map_msgs::msg::OccupancyGridUpdate::Shared
   size_t i = 0;
   for (size_t y = y0; y < yn && y < grid_yn; ++y) {
     for (size_t x = x0; x < xn && x < grid_xn; ++x) {
-      size_t idx = y * grid_xn + x;  // index to grid for this specified cell
+      size_t idx = y * grid_xn + x;  // index to grFid for this specified cell
       map->data[idx] = msg->data[i];
       ++i;
     }
