@@ -1,3 +1,6 @@
 *sublime-*
 *.svg
 *.xcf
+build/
+install/
+log/

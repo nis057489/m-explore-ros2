@@ -40,6 +40,7 @@
 // #include <ros/console.h>
 #include <opencv2/core/utility.hpp>
 #include "testing_helpers.h"
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>  // Updated include
 
 #define private public
 #include <combine_grids/merging_pipeline.h>

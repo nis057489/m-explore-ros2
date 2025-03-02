@@ -25,6 +25,7 @@ find_package(nav_msgs REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 find_package(Boost REQUIRED COMPONENTS thread)
 
@@ -95,7 +96,7 @@ target_include_directories(combine_grids PUBLIC
 target_link_libraries(combine_grids ${rclcpp_LIBRARIES} ${OpenCV_LIBS})
 # target_link_libraries(combine_grids ${OpenCV_LIBRARIES})
 
-target_link_libraries(map_merge combine_grids)
+target_link_libraries(map_merge combine_grids OpenSSL::Crypto)
 # target_link_libraries(map_merge)
 
 ament_target_dependencies(map_merge ${DEPENDENCIES})

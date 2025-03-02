@@ -44,6 +44,8 @@
 #include <mutex>
 #include <unordered_map>
 
+#include <riblt/RIBLT.h>
+
 #include <combine_grids/merging_pipeline.h>
 #include <geometry_msgs/msg/transform.hpp>
 #include <map_msgs/msg/occupancy_grid_update.hpp>
@@ -100,6 +102,42 @@ private:
   rclcpp::TimerBase::SharedPtr map_merging_timer_;
   rclcpp::TimerBase::SharedPtr topic_subscribing_timer_;
   rclcpp::TimerBase::SharedPtr pose_estimation_timer_;
+
+  // RIBLT related types & members
+  struct GridCell {
+    size_t x;
+    size_t y;
+    int8_t value;
+    
+    std::string serialize() const {
+      std::string buffer;
+      buffer.reserve(sizeof(x) + sizeof(y) + sizeof(value));
+      buffer.append(reinterpret_cast<const char*>(&x), sizeof(x));
+      buffer.append(reinterpret_cast<const char*>(&y), sizeof(y));
+      buffer.append(reinterpret_cast<const char*>(&value), sizeof(value));
+      return buffer;
+    }
+  };
+
+  std::unordered_map<std::string, riblet::RIBLT> robot_riblts_;
+  rclcpp::TimerBase::SharedPtr riblt_sync_timer_;
+  std::chrono::milliseconds riblt_sync_interval_{1000}; // 1 second default
+
+  void ribltMapUpdate(const nav_msgs::msg::OccupancyGrid::SharedPtr& msg,
+                     MapSubscription& subscription);
+  void ribltMapUpdate(const map_msgs::msg::OccupancyGridUpdate::SharedPtr& msg,
+                     MapSubscription& subscription);
+  void ribltSyncCallback();
+
+  // Converts grid cells to RIBLT symbols
+  std::vector<riblet::CodedSymbol> gridCellsToSymbols(
+      const nav_msgs::msg::OccupancyGrid& grid);
+  std::vector<riblet::CodedSymbol> updateCellsToSymbols(
+      const map_msgs::msg::OccupancyGridUpdate& update);
+
+  // Maintains map state from RIBLT symbols
+  void updateMapFromSymbols(const std::vector<GridCell>& cells,
+                          nav_msgs::msg::OccupancyGrid::SharedPtr& map);
 
   std::string robotNameFromTopic(const std::string& topic);
   // bool isRobotMapTopic(const ros::master::TopicInfo& topic);

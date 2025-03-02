@@ -41,7 +41,8 @@
 #include <map_merge/map_merge.h>
 #include <map_merge/ros1_names.hpp>
 #include <rcpputils/asserts.hpp>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+// Replace obsolete header with new one
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 
 namespace map_merge
@@ -111,6 +112,12 @@ subscriptions_size_(0)
     // execute right away to simulate the ros1 first while loop on a thread
     pose_estimation_timer_->execute_callback(); 
   }
+
+  // Initialize RIBLT sync timer
+  riblt_sync_timer_ = this->create_wall_timer(
+    riblt_sync_interval_,
+    std::bind(&MapMerge::ribltSyncCallback, this)
+  );
 }
 
 /*
@@ -180,7 +187,8 @@ void MapMerge::topicSubscribing()
       subscription.map_sub = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
           map_topic, map_qos,
           [this, &subscription](const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
-            fullMapUpdate(msg, subscription);
+            // fullMapUpdate(msg, subscription);
+            ribltMapUpdate(msg, subscription);
           });
       RCLCPP_INFO(logger_, "Subscribing to MAP updates topic: %s.",
               map_updates_topic.c_str());
@@ -189,7 +197,8 @@ void MapMerge::topicSubscribing()
               map_updates_topic, map_qos,
               [this, &subscription](
                   const map_msgs::msg::OccupancyGridUpdate::SharedPtr msg) {
-                partialMapUpdate(msg, subscription);
+                //partialMapUpdate(msg, subscription);
+                ribltMapUpdate(msg, subscription);
               });
     }
   }
@@ -383,6 +392,129 @@ void MapMerge::partialMapUpdate(const map_msgs::msg::OccupancyGridUpdate::Shared
   }
 }
 
+void MapMerge::ribltMapUpdate(const nav_msgs::msg::OccupancyGrid::SharedPtr& msg,
+                             MapSubscription& subscription) 
+{
+  RCLCPP_DEBUG(logger_, "Received RIBLT map update");
+  
+  std::string robot_name = robotNameFromTopic(msg->header.frame_id);
+  auto& riblt = robot_riblts_[robot_name];
+
+  // Convert occupied/free cells to symbols
+  auto symbols = gridCellsToSymbols(*msg);
+  
+  // Add each cell as a separate symbol
+  for (auto& symbol : symbols) {
+    riblt.add(std::move(symbol), [this](size_t index) {
+      RCLCPP_DEBUG(logger_, "Cell symbol added at index %zu", index);
+    });
+  }
+
+  subscription.readonly_map = msg;
+  subscription.writable_map = nullptr;
+}
+
+void MapMerge::ribltMapUpdate(const map_msgs::msg::OccupancyGridUpdate::SharedPtr& msg,
+                             MapSubscription& subscription)
+{
+  RCLCPP_DEBUG(logger_, "Received RIBLT partial update");
+
+  if (!subscription.readonly_map) {
+    RCLCPP_WARN(logger_, "Received partial update without base map, skipping");
+    return;
+  }
+
+  std::string robot_name = robotNameFromTopic(subscription.readonly_map->header.frame_id);
+  auto& riblt = robot_riblts_[robot_name];
+
+  // Convert changed cells to symbols
+  auto symbols = updateCellsToSymbols(*msg);
+  
+  // Add new cell states
+  for (auto& symbol : symbols) {
+    riblt.add(std::move(symbol), [this](size_t index) {
+      RCLCPP_DEBUG(logger_, "Update cell symbol added at index %zu", index);
+    });
+  }
+}
+
+std::vector<riblet::CodedSymbol> MapMerge::gridCellsToSymbols(
+    const nav_msgs::msg::OccupancyGrid& grid)
+{
+  std::vector<riblet::CodedSymbol> symbols;
+  
+  for (size_t y = 0; y < grid.info.height; y++) {
+    for (size_t x = 0; x < grid.info.width; x++) {
+      size_t idx = y * grid.info.width + x;
+      int8_t value = grid.data[idx];
+      
+      // Only track non-unknown cells
+      if (value != -1) {
+        GridCell cell{x, y, value};
+        symbols.emplace_back(cell.serialize());
+      }
+    }
+  }
+  
+  return symbols;
+}
+
+std::vector<riblet::CodedSymbol> MapMerge::updateCellsToSymbols(
+    const map_msgs::msg::OccupancyGridUpdate& update)
+{
+  std::vector<riblet::CodedSymbol> symbols;
+  
+  for (size_t y = 0; y < update.height; y++) {
+    for (size_t x = 0; x < update.width; x++) {
+      size_t idx = y * update.width + x;
+      int8_t value = update.data[idx];
+      
+      if (value != -1) {
+        GridCell cell{
+          static_cast<size_t>(update.x) + x,
+          static_cast<size_t>(update.y) + y,
+          value
+        };
+        symbols.emplace_back(cell.serialize());
+      }
+    }
+  }
+  
+  return symbols;
+}
+
+void MapMerge::ribltSyncCallback()
+{
+  nav_msgs::msg::OccupancyGrid::SharedPtr merged_map;
+  std::vector<GridCell> all_cells;
+
+  // Collect cells from all robots' RIBLTs
+  for (auto& [robot_name, riblt] : robot_riblts_) {
+    riblt.peel([&all_cells](const riblet::CodedSymbol& sym) {
+      std::string cell_data = sym.getVal();
+      GridCell cell;
+      std::memcpy(&cell.x, cell_data.data(), sizeof(cell.x));
+      std::memcpy(&cell.y, cell_data.data() + sizeof(cell.x), sizeof(cell.y));
+      std::memcpy(&cell.value, cell_data.data() + sizeof(cell.x) + sizeof(cell.y), sizeof(cell.value));
+      all_cells.push_back(cell);
+    });
+  }
+
+  if (!all_cells.empty()) {
+    // Create or update merged map
+    if (!merged_map) {
+      merged_map = std::make_shared<nav_msgs::msg::OccupancyGrid>();
+      // Initialize map properties
+      merged_map->info.resolution = 0.05; // Set appropriate resolution
+      merged_map->header.frame_id = world_frame_;
+    }
+    
+    updateMapFromSymbols(all_cells, merged_map);
+    merged_map->header.stamp = this->now();
+    merged_map_publisher_->publish(*merged_map);
+  }
+}
+
 std::string MapMerge::robotNameFromTopic(const std::string& topic)
 {
   return ros1_names::parentNamespace(topic);
@@ -433,6 +565,50 @@ bool MapMerge::getInitPose(const std::string& name,
   pose.rotation = toMsg(q);
 
   return success;
+}
+
+void MapMerge::updateMapFromSymbols(const std::vector<GridCell>& cells,
+                                   nav_msgs::msg::OccupancyGrid::SharedPtr& map)
+{
+  if (cells.empty()) {
+    return;
+  }
+
+  // Find grid bounds
+  size_t min_x = std::numeric_limits<size_t>::max();
+  size_t min_y = std::numeric_limits<size_t>::max();
+  size_t max_x = 0;
+  size_t max_y = 0;
+
+  for (const auto& cell : cells) {
+    min_x = std::min(min_x, cell.x);
+    min_y = std::min(min_y, cell.y);
+    max_x = std::max(max_x, cell.x);
+    max_y = std::max(max_y, cell.y);
+  }
+
+  // Initialize or resize grid
+  size_t width = max_x - min_x + 1;
+  size_t height = max_y - min_y + 1;
+
+  if (!map || map->info.width != width || map->info.height != height) {
+    map->info.width = width;
+    map->info.height = height;
+    map->info.origin.position.x = min_x * map->info.resolution;
+    map->info.origin.position.y = min_y * map->info.resolution;
+    map->data.resize(width * height, -1);  // Initialize with unknown cells
+  }
+
+  // Apply cell updates
+  for (const auto& cell : cells) {
+    size_t adj_x = cell.x - min_x;
+    size_t adj_y = cell.y - min_y;
+    size_t idx = adj_y * width + adj_x;
+    
+    if (idx < map->data.size()) {
+      map->data[idx] = cell.value;
+    }
+  }
 }
 }  // namespace map_merge
 
